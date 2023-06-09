@@ -1,5 +1,6 @@
 use either::Either;
 use ethers::prelude::Log as LogParams;
+use serde::Serialize;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,12 +58,13 @@ pub struct BundleParams {
     pub(crate) privacy: Option<Privacy>,
     pub(crate) metadata: Option<Metadata>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Copy)]
 pub struct Refund {
     body_idx: i32,
     percent: i32,
 }
-#[derive(Debug, Clone)]
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RefundConfig {
     address: String,
     percent: i32,

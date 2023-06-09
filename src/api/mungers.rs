@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, error::Error};
+use either::Either;
 use serde_json::Value;
 use super::interface::{HintPreferences, BundleParams, TransactionOptions, SimBundleOptions, BodyType};
 
@@ -24,10 +25,12 @@ fn extract_specified_hints(hints: HintPreferences) -> Vec<String> {
 pub fn munge_private_tx_params(signed_tx: String, options: Option<TransactionOptions>) -> Vec<HashMap<String, Value>> {
     let mut transaction_data = HashMap::new();
     transaction_data.insert("tx".to_string(), Value::String(signed_tx));
-    transaction_data.insert("maxBlockNumber".to_string(), Value::String(options.map(|o| format!("{:#x}", o.max_block_number.unwrap())).unwrap_or(String::new())));
     transaction_data.insert("fast".to_string(), Value::Bool(true)); 
 
     if let Some(options) = options {
+        if let Some(max_block_number) = options.max_block_number {
+            transaction_data.insert("maxBlockNumber".to_string(), Value::String(format!("{:#x}", max_block_number)));
+        }
         if let Some(hints) = options.hints {
             let extracted_hints = extract_specified_hints(hints);
             let hints_array: Vec<Value> = extracted_hints.into_iter().map(Value::String).collect();
@@ -47,65 +50,83 @@ pub fn munge_bundle_params(params: BundleParams) -> HashMap<String, Value> {
     let mut new_params = HashMap::new();
 
     // We need to handle the body data more carefully as it is an array of multiple types
-    let body_data: Vec<Value> = params.body.iter().map(|item| {
+    let body_data: Vec<Value> = params.body.into_iter().map(|item| {
         match item {
             BodyType::Hash(hash) => {
-                // Do something with hash
-            }
+                let mut new_item = HashMap::new();
+                new_item.insert("hash".to_string(), Value::String(hash));
+                Value::Object(serde_json::Map::from_iter(new_item.into_iter()))
+            },
             BodyType::Tx { tx, can_revert } => {
-                // Do something with tx and can_revert
-            }
-            BodyType::Bundle(bundle) => {
-                // If you find a bundle, munge it and insert
-                let munged_bundle = munge_bundle_params(bundle.clone());
-                let munged_bundle_map: serde_json::Map<String, Value> = munged_bundle.into_iter().collect();
-                new_params.insert("bundle".to_string(), Value::Object(munged_bundle_map));
-
-            }
+                let mut new_item = HashMap::new();
+                new_item.insert("tx".to_string(), Value::String(tx));
+                new_item.insert("can_revert".to_string(), Value::Bool(can_revert));
+                Value::Object(serde_json::Map::from_iter(new_item.into_iter()))
+            },
+            BodyType::Bundle(bundle_params) => {
+                let munged_bundle = munge_bundle_params(bundle_params);
+                Value::Object(munged_bundle.into_iter().collect::<serde_json::Map<String, Value>>())
+            },
         }
     }).collect();
 
     new_params.insert("body".to_string(), Value::Array(body_data));
-    new_params.insert("version".to_string(), Value::String(params.version.unwrap_or("v0.1".to_string())));
-    new_params.insert("block".to_string(), Value::String(format!("{:#x}", params.inclusion.block)));
-    if let Some(max_block) = params.inclusion.max_block {
-        new_params.insert("maxBlock".to_string(), Value::String(format!("{:#x}", max_block)));
-    }
-
-    // Update how you handle validity
-    let validity_value = match params.validity {
-        Some(validity) => {
-            let mut validity_map = HashMap::new();
-            validity_map.insert("refund".to_string(), Value::Array(validity.refund.iter().map(|x| Value::String(x.clone())).collect()));
-            validity_map.insert("refundConfig".to_string(), Value::Array(validity.refund_config.iter().map(|x| Value::String(x.clone())).collect()));
-            Value::Object(validity_map)
-        }
-        None => {
-            let mut default_validity = HashMap::new();
-            default_validity.insert("refund".to_string(), Value::Array(Vec::new()));
-            default_validity.insert("refundConfig".to_string(), Value::Array(Vec::new()));
-            Value::Object(default_validity)
-        }
-    };
-
-    new_params.insert("validity".to_string(), validity_value);
-
-    if let Some(privacy) = params.privacy {
-        if let Some(hints) = privacy.hints {
-            let extracted_hints = extract_specified_hints(hints);
-            let hints_array: Vec<Value> = extracted_hints.into_iter().map(Value::String).collect();
-            new_params.insert("hints".to_string(), Value::Array(hints_array));
-        }
-    }
     
+    // Add the rest of the params as normal
+    new_params.insert("version".to_string(), Value::String(params.version.unwrap_or("v0.1".to_string())));
+    // Assuming BlockInclusion has block and maxBlock fields.
+    new_params.insert("inclusion".to_string(), {
+        let mut inclusion = HashMap::new();
+        inclusion.insert("block".to_string(), Value::String(format!("{:#x}", params.inclusion.block)));
+        if let Some(max_block) = params.inclusion.max_block {
+            inclusion.insert("maxBlock".to_string(), Value::String(format!("{:#x}", max_block)));
+        }
+        Value::Object(inclusion.into_iter().collect())
+    });
+    // Assuming Validity has refund and refundConfig fields.
+    new_params.insert("validity".to_string(), {
+        let mut validity = HashMap::new();
+        validity.insert("refund".to_string(), Value::Array(
+            params.validity.clone()
+                .unwrap()
+                .refund
+                .unwrap_or(Vec::new())
+                .into_iter()
+                .map(|refund| serde_json::to_value(refund).unwrap())
+                .collect()
+        ));
+        
+        validity.insert("refundConfig".to_string(), Value::Array(
+            params.validity
+                .unwrap()
+                .refund_config
+                .unwrap_or(Vec::new())
+                .into_iter()
+                .map(|refund_config| serde_json::to_value(refund_config).unwrap())
+                .collect()
+        ));
+        
+        Value::Object(validity.into_iter().collect())
+    });
+    if let Some(hints) = params.privacy.unwrap().hints {
+        let extracted_hints = extract_specified_hints(hints);
+        let hints_array: Vec<Value> = extracted_hints.into_iter().map(Value::String).collect();
+        new_params.insert("hints".to_string(), Value::Array(hints_array));
+    }
+
     new_params
 }
 
 
-pub fn munge_sim_bundle_options(params: SimBundleOptions) -> HashMap<String, Value> {
+
+pub fn munge_sim_bundle_options(params: SimBundleOptions) -> Result<HashMap<String, Value>, Box<dyn Error>> {
     let mut new_params = HashMap::new();
 
-    new_params.insert("parentBlock".to_string(), Value::String(format!("{:#x}", params.parent_block.unwrap())));
+    match params.parent_block {
+        Some(Either::Left(i)) => new_params.insert("parentBlock".to_string(), Value::String(format!("{:#x}", i))),
+        Some(Either::Right(s)) => new_params.insert("parentBlock".to_string(), Value::String(s)),
+        None => return Err("parentBlock value is missing!".into()),  // Replace with your preferred error handling
+    };
     new_params.insert("blockNumber".to_string(), Value::String(format!("{:#x}", params.block_number.unwrap())));
     new_params.insert("timestamp".to_string(), Value::String(format!("{:#x}", params.timestamp.unwrap())));
     new_params.insert("gasLimit".to_string(), Value::String(format!("{:#x}", params.gas_limit.unwrap())));
@@ -113,7 +134,7 @@ pub fn munge_sim_bundle_options(params: SimBundleOptions) -> HashMap<String, Val
     new_params.insert("coinbase".to_string(), Value::String(params.coinbase.unwrap_or(String::new())));
     new_params.insert("timeout".to_string(), Value::String(params.timeout.map(|t| t.to_string()).unwrap_or(String::new())));
 
-    new_params
+    Ok(new_params)
 }
 
 
